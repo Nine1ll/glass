@@ -1,220 +1,415 @@
-import numpy as np
-import time
+"""Sugar Glass board solver.
 
-# ==========================================
-# 1. 모양 데이터베이스 (회전 불가 - 방향별 정의)
-# ==========================================
-shapes_db = {
-    # --- 1칸 ---
-    '1_dot': [[1]],
+This module searches for the highest scoring placement of Sugar Glass pieces on a
+7x7 board with locked cells.  Shapes are not rotatable, and the scoring rules
+follow the description supplied in the prompt:
 
-    # --- 2칸 ---
-    '2_bar_h': [[1, 1]],       # 가로 ㅡ
-    '2_bar_v': [[1], [1]],     # 세로 |
+* Grade per-cell scores: Rare=30, Epic=60, Super Epic=120, Unique=250.
+* Set bonus: placing at least 9 cells of the chosen modifier yields +265 points
+  and every additional 3 cells (up to 21) adds another +265.
+* Only modifiers selected for the current build are eligible for base points and
+  set bonus contributions.
 
-    # --- 3칸 ---
-    '3_bar_h': [[1, 1, 1]],    # 가로 ㅡ
-    '3_bar_v': [[1], [1], [1]],# 세로 |
-    '3_L_ru': [[1, 0], [1, 1]],# ㄴ (우하향)
-    '3_L_lu': [[0, 1], [1, 1]],# ┘ (좌상향 채움 - 실제 모양은 J 뒤집은 것)
-    '3_L_rd': [[1, 1], [1, 0]],# ㄱ
-    '3_L_ld': [[1, 1], [0, 1]],# ┌ (7 모양)
-    
-    # 사진상의 구체적인 3칸 L 모양 매핑
-    '3_L_corner_bl': [[1, 0], [1, 1]], # ㄴ 모양
-    '3_L_corner_tl': [[1, 1], [1, 0]], # ㄱ 모양
-    '3_L_corner_tr': [[1, 1], [0, 1]], # 7 모양
-    '3_L_corner_br': [[0, 1], [1, 1]], # ┘ 모양
+The solver can easily be extended to support shapes detected from images.  For
+now, a curated library of shapes (1~5 cells plus the unique patterns shown in the
+prompt) is provided along with an example inventory.
+"""
 
-    # --- 4칸 (에픽/슈퍼에픽) ---
-    '4_square': [[1, 1], [1, 1]],     # ㅁ
-    '4_bar_h': [[1, 1, 1, 1]],        # ㅡ
-    '4_bar_v': [[1], [1], [1], [1]],  # |
-    
-    # T자
-    '4_T_up':    [[0, 1, 0], [1, 1, 1]], # ㅗ
-    '4_T_down':  [[1, 1, 1], [0, 1, 0]], # ㅜ
-    '4_T_left':  [[0, 1], [1, 1], [0, 1]], # ㅓ
-    '4_T_right': [[1, 0], [1, 1], [1, 0]], # ㅏ
-    
-    # L자 (테트리스)
-    '4_L_normal': [[1, 0], [1, 0], [1, 1]], # ㄴ
-    '4_L_flip':   [[0, 1], [0, 1], [1, 1]], # ┘ (J)
-    '4_L_pair_1': [[1, 1, 1], [1, 0, 0]],   # L 누운것
-    '4_L_pair_2': [[1, 0, 0], [1, 1, 1]],   # J 누운것
-    '4_L_small_ang': [[1,1], [0,1], [0,1]]  # ㄱ자 길게
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+# ---------------------------------------------------------------------------
+# Shape library
+# ---------------------------------------------------------------------------
+
+
+class ShapeLibrary:
+    """Stores every non-rotatable shape and pre-computed metadata."""
+
+    def __init__(self) -> None:
+        self._masks: Dict[str, Tuple[Tuple[int, ...], ...]] = {}
+        self._coords: Dict[str, Tuple[Tuple[int, int], ...]] = {}
+        self._dims: Dict[str, Tuple[int, int]] = {}
+        self._cell_counts: Dict[str, int] = {}
+
+    def register(self, name: str, mask: Sequence[Sequence[int]]) -> None:
+        if name in self._masks:
+            raise ValueError(f"Shape '{name}' already registered")
+
+        rows = tuple(tuple(int(value) for value in row) for row in mask)
+        coords: List[Tuple[int, int]] = []
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                if value:
+                    coords.append((r, c))
+
+        self._masks[name] = rows
+        self._coords[name] = tuple(coords)
+        self._dims[name] = (len(rows), len(rows[0]) if rows else 0)
+        self._cell_counts[name] = len(coords)
+
+    def coords(self, name: str) -> Tuple[Tuple[int, int], ...]:
+        return self._coords[name]
+
+    def dims(self, name: str) -> Tuple[int, int]:
+        return self._dims[name]
+
+    def cell_count(self, name: str) -> int:
+        return self._cell_counts[name]
+
+
+shape_library = ShapeLibrary()
+
+
+# Helper to make registrations slightly more compact
+register = shape_library.register
+
+# 1~3 cell shapes -----------------------------------------------------------
+register("1_dot", [[1]])
+register("2_bar_h", [[1, 1]])
+register("2_bar_v", [[1], [1]])
+register("3_bar_h", [[1, 1, 1]])
+register("3_bar_v", [[1], [1], [1]])
+register("3_L_nw", [[1, 0], [1, 1]])
+register("3_L_ne", [[0, 1], [1, 1]])
+register("3_L_sw", [[1, 1], [1, 0]])
+register("3_L_se", [[1, 1], [0, 1]])
+
+# 4 cell shapes (tetromino family) -----------------------------------------
+register("4_square", [[1, 1], [1, 1]])
+register("4_bar_h", [[1, 1, 1, 1]])
+register("4_bar_v", [[1], [1], [1], [1]])
+register("4_T_up", [[0, 1, 0], [1, 1, 1]])
+register("4_T_down", [[1, 1, 1], [0, 1, 0]])
+register("4_T_left", [[0, 1], [1, 1], [0, 1]])
+register("4_T_right", [[1, 0], [1, 1], [1, 0]])
+register("4_L_tall", [[1, 0], [1, 0], [1, 1]])
+register("4_J_tall", [[0, 1], [0, 1], [1, 1]])
+register("4_L_wide", [[1, 1, 1], [1, 0, 0]])
+register("4_J_wide", [[1, 1, 1], [0, 0, 1]])
+register("4_S_h", [[0, 1, 1], [1, 1, 0]])
+register("4_S_v", [[1, 0], [1, 1], [0, 1]])
+register("4_Z_h", [[1, 1, 0], [0, 1, 1]])
+register("4_Z_v", [[0, 1], [1, 1], [1, 0]])
+
+# 5 cell shapes (pentomino style) ------------------------------------------
+register("5_plus", [[0, 1, 0], [1, 1, 1], [0, 1, 0]])
+register("5_L_tall", [[1, 0], [1, 0], [1, 0], [1, 1]])
+register("5_L_wide", [[1, 1, 1, 1], [1, 0, 0, 0]])
+register("5_T_long", [[1, 1, 1, 1, 1], [0, 0, 1, 0, 0]])
+register("5_U", [[1, 0, 1], [1, 1, 1]])
+register("5_V", [[1, 0, 0], [1, 0, 0], [1, 1, 1]])
+register("5_W", [[1, 0, 0], [1, 1, 0], [0, 1, 1]])
+register("5_P", [[1, 1], [1, 1], [1, 0]])
+register("5_F", [[0, 1, 1], [1, 1, 0], [0, 1, 0]])
+register("5_Y", [[0, 1], [1, 1], [0, 1], [0, 1]])
+register("5_Z", [[1, 1, 0], [0, 1, 0], [0, 1, 1]])
+register("5_S", [[0, 1, 1], [0, 1, 0], [1, 1, 0]])
+register("5_N", [[1, 1, 0], [1, 0, 0], [0, 1, 1]])
+register("5_arrow", [[0, 1, 0], [1, 1, 1], [0, 1, 1]])
+register("5_hook", [[1, 1, 1], [1, 0, 0], [1, 0, 0]])
+
+# Unique shapes from the prompt (non-rotatable) -----------------------------
+register("unique_arrow", [[0, 1, 1, 0], [1, 1, 1, 1]])
+register("unique_hook", [[1, 1, 1], [1, 0, 0], [1, 0, 0], [1, 0, 0]])
+register("unique_split", [[1, 1, 0], [1, 0, 0], [1, 1, 1]])
+register("unique_wave", [[1, 1, 0, 0], [0, 1, 1, 0], [0, 0, 1, 1]])
+
+
+# ---------------------------------------------------------------------------
+# Core domain objects
+# ---------------------------------------------------------------------------
+
+
+SCORE_PER_GRADE = {
+    "rare": 30,
+    "epic": 60,
+    "superepic": 120,
+    "unique": 250,
 }
 
-# ==========================================
-# 2. 게임 맵 (잠김 칸 반영)
-# ==========================================
-current_map = [
-    [1, 0, 0, 1, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0],
-    [1, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0],
-    [1, 0, 1, 0, 0, 0, 1],
-    [1, 1, 1, 1, 0, 0, 1]
-]
+BONUS_THRESHOLD = 9
+BONUS_STEP_SIZE = 3
+BONUS_VALUE = 265
+BONUS_CAP = 21
 
-# ==========================================
-# 3. 사용자 인벤토리 (사진 분석 데이터 입력됨)
-# ==========================================
-# 전략: 광휘(Gwanghwi)를 메인 세트로 설정하여 보너스 획득
-# 관통(Gwantong)의 슈퍼에픽은 깡점수가 높으므로 포함, 나머지는 서브
-my_inventory = []
 
-# [1] 관통 (Gwantong) - 빨간색(슈퍼에픽), 보라색(에픽)
-# 사진 2번째: 슈퍼에픽 T(아래), T(왼쪽) / 에픽 T(아래), L(뒤집힘) 등
-my_inventory.extend([
-    {'shape': '4_T_down',  'grade': 'superepic', 'is_main_set': False}, # 🟥 슈퍼에픽 ㅜ
-    {'shape': '4_T_left',  'grade': 'superepic', 'is_main_set': False}, # 🟥 슈퍼에픽 ㅓ
-    {'shape': '4_T_down',  'grade': 'epic',      'is_main_set': False}, # 🟪 에픽 ㅜ
-    {'shape': '4_L_flip',  'grade': 'epic',      'is_main_set': False}, # 🟪 에픽 ┘ (x2)
-    {'shape': '4_L_flip',  'grade': 'epic',      'is_main_set': False}, 
-    {'shape': '3_bar_h',   'grade': 'epic',      'is_main_set': False}, # 🟪 나머지 에픽들...
-    {'shape': '3_L_corner_bl', 'grade': 'epic',  'is_main_set': False},
-    {'shape': '3_bar_h',   'grade': 'epic',      'is_main_set': False},
-    {'shape': '3_L_corner_tr', 'grade': 'epic',  'is_main_set': False}, 
-    {'shape': '3_L_corner_bl', 'grade': 'epic',  'is_main_set': False},
-    {'shape': '2_bar_v',   'grade': 'epic',      'is_main_set': False},
-    {'shape': '2_bar_v',   'grade': 'epic',      'is_main_set': False},
-])
+@dataclass(frozen=True)
+class GlassPiece:
+    name: str
+    shape: str
+    grade: str
+    modifier: str  # e.g. 광휘, 관통, 원소, 파쇄, 축복 등
+    role: str      # dealer / striker / supporter (for bookkeeping)
 
-# [2] 광휘 (Gwanghwi) - 보라색(에픽), 파란색(레어)
-# 사진 1번째: 2x2 사각형이 많음. 메인 세트(True)
-my_inventory.extend([
-    # --- 에픽 (보라 배경) ---
-    {'shape': '4_square',  'grade': 'epic', 'is_main_set': True}, # 🟪 네모 (x3)
-    {'shape': '4_square',  'grade': 'epic', 'is_main_set': True},
-    {'shape': '4_square',  'grade': 'epic', 'is_main_set': True},
-    {'shape': '1_dot',     'grade': 'epic', 'is_main_set': True}, # 🟪 1칸 (에픽배경)
-    {'shape': '1_dot',     'grade': 'epic', 'is_main_set': True},
-    {'shape': '2_bar_v',   'grade': 'epic', 'is_main_set': True}, # 🟪 2칸 세로
-    {'shape': '2_bar_v',   'grade': 'epic', 'is_main_set': True},
-    {'shape': '3_bar_h',   'grade': 'epic', 'is_main_set': True}, # 🟪 3칸 가로
-    {'shape': '3_bar_v',   'grade': 'epic', 'is_main_set': True}, # 🟪 3칸 세로
-    {'shape': '3_L_corner_bl', 'grade': 'epic', 'is_main_set': True}, # 🟪 ㄴ자
+    def cell_count(self) -> int:
+        return shape_library.cell_count(self.shape)
 
-    # --- 레어 (파란 배경) ---
-    {'shape': '2_bar_h',   'grade': 'rare', 'is_main_set': True}, # 🟦
-    {'shape': '2_bar_h',   'grade': 'rare', 'is_main_set': True},
-    {'shape': '1_dot',     'grade': 'rare', 'is_main_set': True}, # 🟦 점 (x4)
-    {'shape': '1_dot',     'grade': 'rare', 'is_main_set': True},
-    {'shape': '1_dot',     'grade': 'rare', 'is_main_set': True},
-    {'shape': '1_dot',     'grade': 'rare', 'is_main_set': True},
-    {'shape': '3_bar_v',   'grade': 'rare', 'is_main_set': True}, # 🟦 3칸 세로
-    {'shape': '3_bar_v',   'grade': 'rare', 'is_main_set': True},
-    {'shape': '3_L_corner_br', 'grade': 'rare', 'is_main_set': True}, # 🟦 ┘ 모양 (x4)
-    {'shape': '3_L_corner_br', 'grade': 'rare', 'is_main_set': True},
-    {'shape': '3_L_corner_br', 'grade': 'rare', 'is_main_set': True},
-    {'shape': '3_L_corner_br', 'grade': 'rare', 'is_main_set': True},
-    {'shape': '3_bar_h',   'grade': 'rare', 'is_main_set': True}, # 🟦 3칸 가로 (x2)
-    {'shape': '3_bar_h',   'grade': 'rare', 'is_main_set': True},
-])
+    def base_score(self) -> int:
+        return SCORE_PER_GRADE[self.grade] * self.cell_count()
 
-# ==========================================
-# 4. 시뮬레이터 엔진
-# ==========================================
-class SugarGlassSolver:
-    def __init__(self, grid_map, inventory):
-        self.rows = 7
-        self.cols = 7
-        self.grid_map = np.array(grid_map)
-        self.inventory = inventory
-        # 점수: 슈퍼에픽(120), 에픽(60), 레어(30)
-        self.score_table = {'superepic': 120, 'epic': 60, 'rare': 30}
-        
-        # 최적화: 점수 높은 순으로 정렬하되, 1칸짜리 등 작은 건 나중에 채우기 위해 뒤로
-        # (단, 칸당 점수 밀도가 높은 슈퍼에픽은 무조건 앞)
-        self.inventory.sort(key=lambda x: (self.score_table.get(x['grade'], 0), len(shapes_db.get(x['shape'], [[0]])[0])), reverse=True)
-        
-        self.best_score = -1
-        self.best_grid = None
 
-    def get_set_bonus(self, count):
-        if count < 9: return 0
-        capped_count = min(count, 21)
-        steps = (capped_count - 9) // 3
-        return 265 + (steps * 265)
+@dataclass(frozen=True)
+class Placement:
+    piece: GlassPiece
+    row: int
+    col: int
 
-    def solve(self):
-        print(f"🧮 최적 배치 계산 중... (보유 조각 {len(self.inventory)}개)")
-        self._backtrack(0, self.grid_map, 0, 0)
-        return self.best_score, self.best_grid
 
-    def _backtrack(self, idx, current_grid, current_base_score, main_type_count):
-        # 현재 상태 점수 (기본 점수 + 세트 점수)
-        total_score = current_base_score + self.get_set_bonus(main_type_count)
-        
-        if total_score > self.best_score:
-            self.best_score = total_score
-            self.best_grid = current_grid.copy()
+class Board:
+    def __init__(self, locked_map: Sequence[Sequence[int]]) -> None:
+        if not locked_map:
+            raise ValueError("Locked map cannot be empty")
+        width = len(locked_map[0])
+        for row in locked_map:
+            if len(row) != width:
+                raise ValueError("All rows must share the same length")
 
-        if idx >= len(self.inventory):
+        self.rows = len(locked_map)
+        self.cols = width
+        self.locked: Tuple[Tuple[bool, ...], ...] = tuple(
+            tuple(bool(cell) for cell in row) for row in locked_map
+        )
+
+    def empty_grid(self) -> List[List[Optional[GlassPiece]]]:
+        return [
+            [None if not self.locked[r][c] else _LOCKED for c in range(self.cols)]
+            for r in range(self.rows)
+        ]
+
+    def can_place(
+        self, grid: Sequence[Sequence[Optional[GlassPiece]]], coords: Iterable[Tuple[int, int]], row: int, col: int
+    ) -> bool:
+        for dr, dc in coords:
+            rr, cc = row + dr, col + dc
+            if rr < 0 or cc < 0 or rr >= self.rows or cc >= self.cols:
+                return False
+            if grid[rr][cc] is not None:
+                return False
+        return True
+
+    def place(
+        self,
+        grid: List[List[Optional[GlassPiece]]],
+        coords: Iterable[Tuple[int, int]],
+        row: int,
+        col: int,
+        piece: GlassPiece,
+    ) -> None:
+        for dr, dc in coords:
+            rr, cc = row + dr, col + dc
+            grid[rr][cc] = piece
+
+    @staticmethod
+    def copy_grid(grid: Sequence[Sequence[Optional[GlassPiece]]]) -> List[List[Optional[GlassPiece]]]:
+        return [list(row) for row in grid]
+
+    @staticmethod
+    def count_empty(grid: Sequence[Sequence[Optional[GlassPiece]]]) -> int:
+        return sum(cell is None for row in grid for cell in row)
+
+
+_LOCKED = object()
+
+
+# ---------------------------------------------------------------------------
+# Solver
+# ---------------------------------------------------------------------------
+
+
+class PlacementSolver:
+    def __init__(
+        self,
+        board: Board,
+        inventory: Sequence[GlassPiece],
+        target_modifiers: Optional[Iterable[str]] = None,
+    ) -> None:
+        self.board = board
+        self.target_modifiers: Optional[Set[str]] = (
+            set(target_modifiers) if target_modifiers is not None else None
+        )
+
+        self.pieces: List[GlassPiece] = sorted(
+            inventory,
+            key=lambda piece: (piece.base_score(), piece.cell_count()),
+            reverse=True,
+        )
+
+        self._remaining_scores = self._build_suffix(lambda p: self._piece_score(p))
+        self._remaining_cells = self._build_suffix(lambda p: self._eligible_cell_count(p))
+
+        self.best_score = 0
+        self.best_grid = board.empty_grid()
+        self.best_placements: List[Placement] = []
+
+    def _build_suffix(self, getter) -> List[int]:
+        suffix: List[int] = [0] * (len(self.pieces) + 1)
+        running = 0
+        for idx in range(len(self.pieces) - 1, -1, -1):
+            running += getter(self.pieces[idx])
+            suffix[idx] = running
+        return suffix
+
+    def _piece_score(self, piece: GlassPiece) -> int:
+        if not self._counts_for_score(piece):
+            return 0
+        return piece.base_score()
+
+    def _eligible_cell_count(self, piece: GlassPiece) -> int:
+        if not self._counts_for_score(piece):
+            return 0
+        return piece.cell_count()
+
+    def _counts_for_score(self, piece: GlassPiece) -> bool:
+        if self.target_modifiers is None:
+            return True
+        return piece.modifier in self.target_modifiers
+
+    def solve(self) -> Tuple[int, List[List[Optional[GlassPiece]]], List[Placement]]:
+        grid = self.board.copy_grid(self.best_grid)
+        self._search(0, grid, 0, 0, [])
+        return self.best_score, self.best_grid, self.best_placements
+
+    def _search(
+        self,
+        idx: int,
+        grid: List[List[Optional[GlassPiece]]],
+        accumulated_score: int,
+        counted_cells: int,
+        placements: List[Placement],
+    ) -> None:
+        current_bonus = compute_set_bonus(counted_cells)
+        total = accumulated_score + current_bonus
+        if total > self.best_score:
+            self.best_score = total
+            self.best_grid = Board.copy_grid(grid)
+            self.best_placements = placements.copy()
+
+        if idx >= len(self.pieces):
             return
 
-        item = self.inventory[idx]
-        shape_key = item['shape']
-        
-        if shape_key not in shapes_db: # 안전장치
-            self._backtrack(idx + 1, current_grid, current_base_score, main_type_count)
+        optimistic = accumulated_score + self._remaining_scores[idx]
+        best_possible_cells = min(BONUS_CAP, counted_cells + self._remaining_cells[idx])
+        optimistic_bonus = compute_set_bonus(best_possible_cells)
+        if optimistic + optimistic_bonus <= self.best_score:
             return
 
-        shape = np.array(shapes_db[shape_key])
-        grade = item['grade']
-        is_main = item['is_main_set']
-        
-        piece_pts = self.score_table[grade] * np.sum(shape)
-        piece_cells = np.sum(shape)
-        
-        h, w = shape.shape
-        placed = False
-        
-        # 배치 시도
-        for r in range(self.rows - h + 1):
-            for c in range(self.cols - w + 1):
-                # 공간 확인
-                if np.all((current_grid[r:r+h, c:c+w] + shape) <= 1):
-                    new_grid = current_grid.copy()
-                    # 시각화 값: 슈에(8), 에픽(7), 레어(6)
-                    vis_val = 8 if grade == 'superepic' else (7 if grade == 'epic' else 6)
-                    
-                    for i in range(h):
-                        for j in range(w):
-                            if shape[i][j] == 1:
-                                new_grid[r+i][c+j] = vis_val
-                                
-                    self._backtrack(idx + 1, new_grid, current_base_score + piece_pts, 
-                                    main_type_count + (piece_cells if is_main else 0))
-                    placed = True
-                    
-                    # 가지치기: 큰 조각을 하나 배치했으면 같은 레벨의 다른 위치 탐색은 
-                    # 경우의 수가 너무 많으면 줄여야 하지만, 여기선 정확도를 위해 진행
-                    # (속도가 너무 느리면 break 추가 가능)
-        
-        # 배치하지 않고 넘어가는 경우
-        # (작은 조각은 건너뛰어도 되지만, 큰 조각은 무조건 넣는게 이득이므로 로직 분리 가능)
-        if not placed:
-             self._backtrack(idx + 1, current_grid, current_base_score, main_type_count)
+        piece = self.pieces[idx]
+        if self.target_modifiers is not None and piece.modifier not in self.target_modifiers:
+            self._search(idx + 1, grid, accumulated_score, counted_cells, placements)
+            return
 
-# ==========================================
-# 5. 결과 출력
-# ==========================================
-solver = SugarGlassSolver(current_map, my_inventory)
-score, final_grid = solver.solve()
+        coords = shape_library.coords(piece.shape)
+        height, width = shape_library.dims(piece.shape)
+        placed_any = False
 
-print(f"\n🏆 최대 점수: {score}점")
-print("\n--- [배치 결과] ---")
-print("🟥:슈퍼에픽(관통)  🟪:에픽  🟦:레어  ⬛:잠김")
-display_map = {0: '⬜', 1: '⬛', 8: '🟥', 7: '🟪', 6: '🟦'}
+        for row in range(self.board.rows - height + 1):
+            for col in range(self.board.cols - width + 1):
+                if not self.board.can_place(grid, coords, row, col):
+                    continue
 
-if final_grid is not None:
-    for row in final_grid:
-        line = ""
+                new_grid = Board.copy_grid(grid)
+                self.board.place(new_grid, coords, row, col, piece)
+                new_score = accumulated_score + self._piece_score(piece)
+                new_cells = counted_cells + piece.cell_count()
+                new_placements = placements + [Placement(piece, row, col)]
+                placed_any = True
+                self._search(idx + 1, new_grid, new_score, new_cells, new_placements)
+
+        # also consider skipping the piece (useful when shape cannot fit)
+        if not placed_any or True:
+            self._search(idx + 1, grid, accumulated_score, counted_cells, placements)
+
+
+# ---------------------------------------------------------------------------
+# Scoring helpers
+# ---------------------------------------------------------------------------
+
+
+def compute_set_bonus(count: int) -> int:
+    if count < BONUS_THRESHOLD:
+        return 0
+    capped = min(count, BONUS_CAP)
+    bonus_groups = 1 + (capped - BONUS_THRESHOLD) // BONUS_STEP_SIZE
+    return bonus_groups * BONUS_VALUE
+
+
+# ---------------------------------------------------------------------------
+# Example usage
+# ---------------------------------------------------------------------------
+
+
+def example_inventory() -> List[GlassPiece]:
+    return [
+        GlassPiece("광휘 네모 A", "4_square", "epic", "광휘", "dealer"),
+        GlassPiece("광휘 네모 B", "4_square", "epic", "광휘", "dealer"),
+        GlassPiece("광휘 3줄", "3_bar_h", "rare", "광휘", "dealer"),
+        GlassPiece("광휘 세로", "3_bar_v", "rare", "광휘", "dealer"),
+        GlassPiece("광휘 ㄴ", "3_L_ne", "rare", "광휘", "dealer"),
+        GlassPiece("관통 ㅜ", "4_T_down", "superepic", "관통", "dealer"),
+        GlassPiece("관통 ㅡ", "4_bar_h", "superepic", "관통", "dealer"),
+        GlassPiece("원소 ㄴ", "4_L_tall", "epic", "원소", "striker"),
+        GlassPiece("축복 유니크", "unique_arrow", "unique", "축복", "supporter"),
+    ]
+
+
+def render_grid(grid: Sequence[Sequence[Optional[GlassPiece]]]) -> str:
+    grade_to_icon = {
+        "rare": "🟦",
+        "epic": "🟪",
+        "superepic": "🟥",
+        "unique": "🟨",
+    }
+    lines: List[str] = []
+    for row in grid:
+        line = []
         for cell in row:
-            line += display_map.get(cell, '⬜')
-        print(line)
-else:
-    print("배치 실패")
+            if cell is _LOCKED:
+                line.append("⬛")
+            elif cell is None:
+                line.append("⬜")
+            else:
+                line.append(grade_to_icon[cell.grade])
+        lines.append("".join(line))
+    return "\n".join(lines)
+
+
+def main() -> None:
+    locked_map = [
+        [1, 0, 0, 1, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [1, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [1, 0, 1, 0, 0, 0, 1],
+        [1, 1, 1, 1, 0, 0, 1],
+    ]
+
+    board = Board(locked_map)
+    inventory = example_inventory()
+
+    print("[광휘 세트 전용 배치]")
+    solver = PlacementSolver(board, inventory, target_modifiers={"광휘"})
+    best_score, best_grid, placements = solver.solve()
+    print(f"최대 점수: {best_score}")
+    print(render_grid(best_grid))
+    for placement in placements:
+        print(
+            f" - {placement.piece.name} ({placement.piece.grade}, {placement.piece.modifier}) -> row {placement.row}, col {placement.col}"
+        )
+
+    print("\n[관통 세트 전용 배치]")
+    pierce_solver = PlacementSolver(board, inventory, target_modifiers={"관통"})
+    pierce_score, pierce_grid, pierce_placements = pierce_solver.solve()
+    print(f"최대 점수: {pierce_score}")
+    print(render_grid(pierce_grid))
+    for placement in pierce_placements:
+        print(
+            f" - {placement.piece.name} ({placement.piece.grade}, {placement.piece.modifier}) -> row {placement.row}, col {placement.col}"
+        )
+
+
+if __name__ == "__main__":
+    main()
