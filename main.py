@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+import json
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Shape library
@@ -111,6 +113,9 @@ register("5_N", [[1, 1, 0], [1, 0, 0], [0, 1, 1]])
 register("5_arrow", [[0, 1, 0], [1, 1, 1], [0, 1, 1]])
 register("5_hook", [[1, 1, 1], [1, 0, 0], [1, 0, 0]])
 
+# 6+ cell shapes (unique-style) --------------------------------------------
+register("6_ramp", [[1, 0], [1, 1], [1, 0], [1, 1]])
+
 # Unique shapes from the prompt (non-rotatable) -----------------------------
 register("unique_arrow", [[0, 1, 1, 0], [1, 1, 1, 1]])
 register("unique_hook", [[1, 1, 1], [1, 0, 0], [1, 0, 0], [1, 0, 0]])
@@ -134,6 +139,7 @@ BONUS_THRESHOLD = 9
 BONUS_STEP_SIZE = 3
 BONUS_VALUE = 265
 BONUS_CAP = 21
+MAX_CONSIDERED_PIECES = 10
 
 
 @dataclass(frozen=True)
@@ -225,17 +231,21 @@ class PlacementSolver:
         board: Board,
         inventory: Sequence[GlassPiece],
         target_modifiers: Optional[Iterable[str]] = None,
+        max_pieces: Optional[int] = None,
     ) -> None:
         self.board = board
         self.target_modifiers: Optional[Set[str]] = (
             set(target_modifiers) if target_modifiers is not None else None
         )
 
-        self.pieces: List[GlassPiece] = sorted(
+        pieces = sorted(
             inventory,
             key=lambda piece: (piece.base_score(), piece.cell_count()),
             reverse=True,
         )
+        if max_pieces is not None:
+            pieces = pieces[:max_pieces]
+        self.pieces = pieces
 
         self._remaining_scores = self._build_suffix(lambda p: self._piece_score(p))
         self._remaining_cells = self._build_suffix(lambda p: self._eligible_cell_count(p))
@@ -341,18 +351,21 @@ def compute_set_bonus(count: int) -> int:
 # ---------------------------------------------------------------------------
 
 
-def example_inventory() -> List[GlassPiece]:
-    return [
-        GlassPiece("광휘 네모 A", "4_square", "epic", "광휘", "dealer"),
-        GlassPiece("광휘 네모 B", "4_square", "epic", "광휘", "dealer"),
-        GlassPiece("광휘 3줄", "3_bar_h", "rare", "광휘", "dealer"),
-        GlassPiece("광휘 세로", "3_bar_v", "rare", "광휘", "dealer"),
-        GlassPiece("광휘 ㄴ", "3_L_ne", "rare", "광휘", "dealer"),
-        GlassPiece("관통 ㅜ", "4_T_down", "superepic", "관통", "dealer"),
-        GlassPiece("관통 ㅡ", "4_bar_h", "superepic", "관통", "dealer"),
-        GlassPiece("원소 ㄴ", "4_L_tall", "epic", "원소", "striker"),
-        GlassPiece("축복 유니크", "unique_arrow", "unique", "축복", "supporter"),
-    ]
+
+def load_inventory(path: Path) -> List[GlassPiece]:
+    data = json.loads(path.read_text())
+    pieces = []
+    for entry in data:
+        pieces.append(
+            GlassPiece(
+                name=entry["name"],
+                shape=entry["shape"],
+                grade=entry["grade"],
+                modifier=entry["modifier"],
+                role=entry.get("role", "dealer"),
+            )
+        )
+    return pieces
 
 
 def render_grid(grid: Sequence[Sequence[Optional[GlassPiece]]]) -> str:
@@ -388,10 +401,16 @@ def main() -> None:
     ]
 
     board = Board(locked_map)
-    inventory = example_inventory()
+    radiance_inventory = load_inventory(Path("radiance_inventory.json"))
+    pierce_inventory = load_inventory(Path("pierce_inventory.json"))
 
     print("[광휘 세트 전용 배치]")
-    solver = PlacementSolver(board, inventory, target_modifiers={"광휘"})
+    solver = PlacementSolver(
+        board,
+        radiance_inventory,
+        target_modifiers={"광휘"},
+        max_pieces=MAX_CONSIDERED_PIECES,
+    )
     best_score, best_grid, placements = solver.solve()
     print(f"최대 점수: {best_score}")
     print(render_grid(best_grid))
@@ -401,7 +420,12 @@ def main() -> None:
         )
 
     print("\n[관통 세트 전용 배치]")
-    pierce_solver = PlacementSolver(board, inventory, target_modifiers={"관통"})
+    pierce_solver = PlacementSolver(
+        board,
+        pierce_inventory,
+        target_modifiers={"관통"},
+        max_pieces=MAX_CONSIDERED_PIECES,
+    )
     pierce_score, pierce_grid, pierce_placements = pierce_solver.solve()
     print(f"최대 점수: {pierce_score}")
     print(render_grid(pierce_grid))

@@ -1,0 +1,114 @@
+[
+  {
+    "name": "관통_0",
+    "shape": "2_bar_v",
+    "grade": "superepic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_1",
+    "shape": "3_L_sw",
+    "grade": "superepic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_2",
+    "shape": "3_L_sw",
+    "grade": "epic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_3",
+    "shape": "3_L_sw",
+    "grade": "epic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_4",
+    "shape": "4_T_right",
+    "grade": "superepic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_5",
+    "shape": "5_P",
+    "grade": "superepic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_6",
+    "shape": "5_P",
+    "grade": "epic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_7",
+    "shape": "5_P",
+    "grade": "epic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_8",
+    "shape": "6_ramp",
+    "grade": "epic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_9",
+    "shape": "6_ramp",
+    "grade": "epic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_10",
+    "shape": "6_ramp",
+    "grade": "epic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_11",
+    "shape": "6_ramp",
+    "grade": "epic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_12",
+    "shape": "3_L_sw",
+    "grade": "epic",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_13",
+    "shape": "3_L_sw",
+    "grade": "rare",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_14",
+    "shape": "3_L_sw",
+    "grade": "rare",
+    "modifier": "관통",
+    "role": "dealer"
+  },
+  {
+    "name": "관통_15",
+    "shape": "3_L_sw",
+    "grade": "rare",
+    "modifier": "관통",
+    "role": "dealer"
+  }
+]
