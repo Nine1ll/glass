@@ -18,7 +18,7 @@ prompt) is provided along with an example inventory.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 import json
 from pathlib import Path
 
@@ -248,7 +248,7 @@ class PlacementSolver:
         self.pieces = pieces
 
         self._remaining_scores = self._build_suffix(lambda p: self._piece_score(p))
-        self._remaining_cells = self._build_suffix(lambda p: self._eligible_cell_count(p))
+        self._remaining_cells = self._build_cell_suffix()
 
         self.best_score = 0
         self.best_grid = board.empty_grid()
@@ -267,19 +267,24 @@ class PlacementSolver:
             return 0
         return piece.base_score()
 
-    def _eligible_cell_count(self, piece: GlassPiece) -> int:
-        if not self._counts_for_score(piece):
-            return 0
-        return piece.cell_count()
-
     def _counts_for_score(self, piece: GlassPiece) -> bool:
         if self.target_modifiers is None:
             return True
         return piece.modifier in self.target_modifiers
 
+    def _build_cell_suffix(self) -> List[Dict[str, int]]:
+        suffix: List[Dict[str, int]] = [{} for _ in range(len(self.pieces) + 1)]
+        running: Dict[str, int] = {}
+        for idx in range(len(self.pieces) - 1, -1, -1):
+            piece = self.pieces[idx]
+            if self._counts_for_score(piece):
+                running[piece.modifier] = running.get(piece.modifier, 0) + piece.cell_count()
+            suffix[idx] = running.copy()
+        return suffix
+
     def solve(self) -> Tuple[int, List[List[Optional[GlassPiece]]], List[Placement]]:
         grid = self.board.copy_grid(self.best_grid)
-        self._search(0, grid, 0, 0, [])
+        self._search(0, grid, 0, {}, [])
         return self.best_score, self.best_grid, self.best_placements
 
     def _search(
@@ -287,10 +292,10 @@ class PlacementSolver:
         idx: int,
         grid: List[List[Optional[GlassPiece]]],
         accumulated_score: int,
-        counted_cells: int,
+        counted_cells: Dict[str, int],
         placements: List[Placement],
     ) -> None:
-        current_bonus = compute_set_bonus(counted_cells)
+        current_bonus = compute_total_bonus(counted_cells)
         total = accumulated_score + current_bonus
         if total > self.best_score:
             self.best_score = total
@@ -301,8 +306,14 @@ class PlacementSolver:
             return
 
         optimistic = accumulated_score + self._remaining_scores[idx]
-        best_possible_cells = min(BONUS_CAP, counted_cells + self._remaining_cells[idx])
-        optimistic_bonus = compute_set_bonus(best_possible_cells)
+        optimistic_counts: Dict[str, int] = {}
+        remaining_cells = self._remaining_cells[idx]
+        for modifier, count in counted_cells.items():
+            optimistic_counts[modifier] = min(BONUS_CAP, count + remaining_cells.get(modifier, 0))
+        for modifier, count in remaining_cells.items():
+            if modifier not in optimistic_counts:
+                optimistic_counts[modifier] = min(BONUS_CAP, count)
+        optimistic_bonus = compute_total_bonus(optimistic_counts)
         if optimistic + optimistic_bonus <= self.best_score:
             return
 
@@ -323,7 +334,8 @@ class PlacementSolver:
                 new_grid = Board.copy_grid(grid)
                 self.board.place(new_grid, coords, row, col, piece)
                 new_score = accumulated_score + self._piece_score(piece)
-                new_cells = counted_cells + piece.cell_count()
+                new_cells = counted_cells.copy()
+                new_cells[piece.modifier] = new_cells.get(piece.modifier, 0) + piece.cell_count()
                 new_placements = placements + [Placement(piece, row, col)]
                 placed_any = True
                 self._search(idx + 1, new_grid, new_score, new_cells, new_placements)
@@ -344,6 +356,10 @@ def compute_set_bonus(count: int) -> int:
     capped = min(count, BONUS_CAP)
     bonus_groups = 1 + (capped - BONUS_THRESHOLD) // BONUS_STEP_SIZE
     return bonus_groups * BONUS_VALUE
+
+
+def compute_total_bonus(counts_by_modifier: Mapping[str, int]) -> int:
+    return sum(compute_set_bonus(count) for count in counts_by_modifier.values())
 
 
 # ---------------------------------------------------------------------------
@@ -403,33 +419,23 @@ def main() -> None:
     board = Board(locked_map)
     radiance_inventory = load_inventory(Path("radiance_inventory.json"))
     pierce_inventory = load_inventory(Path("pierce_inventory.json"))
+    dealer_inventory = [
+        piece
+        for piece in radiance_inventory + pierce_inventory
+        if piece.role == "dealer"
+    ]
 
-    print("[광휘 세트 전용 배치]")
+    print("[딜러 통합 배치 - 광휘 & 관통]")
     solver = PlacementSolver(
         board,
-        radiance_inventory,
-        target_modifiers={"광휘"},
+        dealer_inventory,
+        target_modifiers={"광휘", "관통"},
         max_pieces=MAX_CONSIDERED_PIECES,
     )
     best_score, best_grid, placements = solver.solve()
     print(f"최대 점수: {best_score}")
     print(render_grid(best_grid))
     for placement in placements:
-        print(
-            f" - {placement.piece.name} ({placement.piece.grade}, {placement.piece.modifier}) -> row {placement.row}, col {placement.col}"
-        )
-
-    print("\n[관통 세트 전용 배치]")
-    pierce_solver = PlacementSolver(
-        board,
-        pierce_inventory,
-        target_modifiers={"관통"},
-        max_pieces=MAX_CONSIDERED_PIECES,
-    )
-    pierce_score, pierce_grid, pierce_placements = pierce_solver.solve()
-    print(f"최대 점수: {pierce_score}")
-    print(render_grid(pierce_grid))
-    for placement in pierce_placements:
         print(
             f" - {placement.piece.name} ({placement.piece.grade}, {placement.piece.modifier}) -> row {placement.row}, col {placement.col}"
         )
